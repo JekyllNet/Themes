@@ -1,0 +1,40 @@
+---
+name: "New Category Request / 申请新主题分类"
+description: "Request a new theme category to be added to the store. / 申请在商店中新增主题分类。"
+title: "[New Category] <category-name>"
+labels: ["new-category"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## New Category Request / 新主题分类申请
+        Use this template **only** if your theme does not fit any existing category.  
+        仅当您的主题**不适合**任何现有分类时，才使用此模板。
+
+        Existing categories: `blog` | `portfolio` | `documentation` | `landing` | `minimal` | `business`  
+        现有分类：`blog` | `portfolio` | `documentation` | `landing` | `minimal` | `business`
+
+  - type: input
+    id: category_name
+    attributes:
+      label: "Proposed Category Name / 建议分类名称"
+      description: "Lowercase, hyphen-separated, no spaces. / 小写，用连字符分隔，不含空格。"
+      placeholder: "e.g. e-commerce"
+    validations:
+      required: true
+
+  - type: textarea
+    id: category_description
+    attributes:
+      label: "Category Description / 分类说明"
+      description: "Describe what kinds of themes belong in this category. / 说明哪些主题属于此分类。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: example_themes
+    attributes:
+      label: "Example Themes / 示例主题"
+      description: "List one or more themes that would fit this category. / 列举一个或多个适合此分类的主题。"
+    validations:
+      required: true
