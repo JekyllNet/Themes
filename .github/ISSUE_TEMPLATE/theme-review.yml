@@ -1,0 +1,71 @@
+---
+name: "Theme Review / 主题问题反馈"
+description: "Report a problem with an existing theme in the store. / 反馈商店中已有主题的问题。"
+title: "[Theme Review] <Theme Name> — <brief description>"
+labels: ["theme-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Theme Review / 主题问题反馈
+        Use this template to report a problem with a theme that is **already in the store**.  
+        使用此模板反馈**已收录**主题的问题。
+
+  - type: input
+    id: pr_number
+    attributes:
+      label: "Related PR Number / 关联 PR 编号"
+      description: "The PR number that introduced this theme. / 引入该主题的 PR 编号。"
+      placeholder: "#123"
+    validations:
+      required: true
+
+  - type: input
+    id: theme_name
+    attributes:
+      label: "Theme Name / 主题名称"
+      description: "The name of the theme. / 主题名称。"
+      placeholder: "e.g. my-awesome-theme"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme_category
+    attributes:
+      label: "Theme Category / 主题分类"
+      description: "The category the theme belongs to. / 该主题所属的分类。"
+      options:
+        - blog
+        - portfolio
+        - documentation
+        - landing
+        - minimal
+        - business
+    validations:
+      required: true
+
+  - type: input
+    id: preview_url
+    attributes:
+      label: "Preview URL / 预览地址"
+      description: "The live preview URL of the theme. / 主题的在线预览地址。"
+      placeholder: "https://example.com"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Problem Description / 问题说明"
+      description: "Describe the problem clearly. / 清晰描述问题。"
+      placeholder: "Describe the issue, include steps to reproduce if applicable."
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional Context / 补充信息"
+      description: "Screenshots, links, or any other context. / 截图、链接或其他相关信息。"
+    validations:
+      required: false
