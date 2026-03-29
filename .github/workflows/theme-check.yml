@@ -1,0 +1,454 @@
+name: Theme Submission Check / 主题提交检查
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  theme-check:
+    name: Theme Check / 主题检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout PR ─────────────────────────────────────────────────────
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      # ── 2. Setup .NET 10 ───────────────────────────────────────────────────
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # ── 3. Build & publish ThemeChecker (C# .NET 10) ──────────────────────
+      - name: Build ThemeChecker
+        run: |
+          dotnet publish tools/ThemeChecker/ThemeChecker.csproj \
+            --configuration Release \
+            --output /tmp/ThemeChecker
+          echo "✅ ThemeChecker built successfully"
+
+      # ── 4. Write PR body to a temp file ────────────────────────────────────
+      #      (safe multiline handling via github-script)
+      - name: Write PR body to file
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = context.payload.pull_request.body ?? '';
+            fs.writeFileSync('/tmp/pr-body.md', body, 'utf8');
+            core.info(`PR body written (${body.length} chars)`);
+
+      # ── 5. PR template & local structure check ─────────────────────────────
+      - name: Run PR spec check
+        id: spec-check
+        continue-on-error: true
+        run: |
+          /tmp/ThemeChecker/ThemeChecker check-pr \
+            --pr-body /tmp/pr-body.md \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --output /tmp/pr-info.json \
+            > /tmp/spec-report.md 2>&1
+          SPEC_EXIT=$?
+          cat /tmp/spec-report.md
+          exit $SPEC_EXIT
+
+      # ── 6. Extract theme repo URL & SHA from parsed PR info ────────────────
+      - name: Extract theme repository info
+        id: theme-info
+        run: |
+          if [ -f /tmp/pr-info.json ]; then
+            REPO_URL=$(jq -r '.themeRepoUrl // empty' /tmp/pr-info.json)
+            GIT_SHA=$(jq  -r '.gitSha      // empty' /tmp/pr-info.json)
+          else
+            REPO_URL=""
+            GIT_SHA=""
+          fi
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "git_sha=$GIT_SHA"   >> "$GITHUB_OUTPUT"
+          echo "Theme Repo URL : $REPO_URL"
+          echo "Git SHA        : $GIT_SHA"
+
+      # ── 7. Clone theme repository at the specified SHA ─────────────────────
+      - name: Clone theme repository
+        id: clone-theme
+        continue-on-error: true
+        run: |
+          REPO_URL="${{ steps.theme-info.outputs.repo_url }}"
+          GIT_SHA="${{ steps.theme-info.outputs.git_sha }}"
+
+          if [ -z "$REPO_URL" ] || [ -z "$GIT_SHA" ]; then
+            echo "clone_status=skipped" >> "$GITHUB_OUTPUT"
+            echo "⏭️ Skipped — no valid Theme Repository URL or Git SHA found." \
+              > /tmp/clone-report.md
+            exit 0
+          fi
+
+          echo "Cloning $REPO_URL ..."
+          if git clone --depth=50 "$REPO_URL" /tmp/theme-repo 2>&1; then
+            cd /tmp/theme-repo
+            echo "Checking out $GIT_SHA ..."
+            git fetch --depth=1 origin "$GIT_SHA" 2>&1 || true
+            if git checkout "$GIT_SHA" 2>&1; then
+              echo "clone_status=success" >> "$GITHUB_OUTPUT"
+              echo "✅ Cloned and checked out \`$GIT_SHA\`" > /tmp/clone-report.md
+            else
+              echo "clone_status=failed" >> "$GITHUB_OUTPUT"
+              echo "❌ Failed to checkout \`$GIT_SHA\`" > /tmp/clone-report.md
+              exit 1
+            fi
+          else
+            echo "clone_status=failed" >> "$GITHUB_OUTPUT"
+            echo "❌ Failed to clone \`$REPO_URL\`" > /tmp/clone-report.md
+            exit 1
+          fi
+
+      # ── 8. Jekyll theme structure check (C# .NET 10) ──────────────────────
+      - name: Check Jekyll theme structure
+        id: structure-check
+        continue-on-error: true
+        if: steps.clone-theme.outputs.clone_status == 'success'
+        run: |
+          /tmp/ThemeChecker/ThemeChecker check-theme \
+            --theme-path /tmp/theme-repo \
+            > /tmp/structure-report.md 2>&1
+          STRUCT_EXIT=$?
+          cat /tmp/structure-report.md
+          exit $STRUCT_EXIT
+
+      # ── 9. Setup Ruby for Jekyll build ────────────────────────────────────
+      - name: Setup Ruby
+        if: steps.clone-theme.outputs.clone_status == 'success'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      # ── 10. Jekyll build check ─────────────────────────────────────────────
+      - name: Jekyll build check
+        id: build-check
+        continue-on-error: true
+        if: steps.clone-theme.outputs.clone_status == 'success'
+        run: |
+          cd /tmp/theme-repo
+          {
+            echo "### 🔨 Jekyll Build Check"
+            echo ""
+
+            if [ -f Gemfile ]; then
+              echo "**Running** \`bundle install\` ..."
+              echo ""
+              echo '```'
+              if bundle install --jobs=4 --retry=3 2>&1; then
+                echo '```'
+                echo ""
+                echo "**Running** \`bundle exec jekyll build\` ..."
+                echo ""
+                echo '```'
+                if bundle exec jekyll build --destination /tmp/jekyll-site 2>&1; then
+                  echo '```'
+                  echo ""
+                  echo "- ✅ Jekyll build **succeeded**"
+                else
+                  echo '```'
+                  echo ""
+                  echo "- ❌ Jekyll build **failed** (see output above)"
+                  exit 1
+                fi
+              else
+                echo '```'
+                echo ""
+                echo "- ❌ \`bundle install\` **failed** (see output above)"
+                exit 1
+              fi
+            else
+              echo "No Gemfile found — installing Jekyll gem directly ..."
+              echo ""
+              echo '```'
+              gem install jekyll bundler 2>&1
+              echo '```'
+              echo ""
+              echo "**Running** \`jekyll build\` ..."
+              echo ""
+              echo '```'
+              if jekyll build --destination /tmp/jekyll-site 2>&1; then
+                echo '```'
+                echo ""
+                echo "- ✅ Jekyll build **succeeded**"
+              else
+                echo '```'
+                echo ""
+                echo "- ❌ Jekyll build **failed** (see output above)"
+                exit 1
+              fi
+            fi
+
+            echo ""
+            echo "> **1 passed** | **0 failed** | **0 warnings**"
+            echo ""
+          } | tee /tmp/build-report.md
+          exit "${PIPESTATUS[0]}"
+
+      # ── 11. Check whether pages pipeline already exists in cloned repo ──────
+      - name: Check for existing pages pipeline
+        id: pages-exists
+        if: steps.clone-theme.outputs.clone_status == 'success'
+        run: |
+          if [ -f "/tmp/theme-repo/.github/workflows/jekyllnet-pages.yml" ]; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 12. Fork theme repo and inject JekyllNet pages pipeline via PR ─────
+      #        Requires secret: JEKYLLNET_BOT_TOKEN (PAT with repo scope)
+      - name: Inject JekyllNet pages pipeline
+        id: pages-inject
+        continue-on-error: true
+        if: |
+          steps.clone-theme.outputs.clone_status == 'success' &&
+          steps.pages-exists.outputs.exists == 'false' &&
+          steps.build-check.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.JEKYLLNET_BOT_TOKEN }}
+        run: |
+          REPO_URL="${{ steps.theme-info.outputs.repo_url }}"
+
+          # ── Guard: token must be set ────────────────────────────────────────
+          if [ -z "$GH_TOKEN" ]; then
+            echo "inject_status=skipped" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️ JekyllNet Pages Pipeline"
+              echo ""
+              echo "> Secret \`JEKYLLNET_BOT_TOKEN\` is not configured — injection skipped."
+            } > /tmp/pages-inject-report.md
+            exit 0
+          fi
+
+          # ── Guard: only github.com repos supported ──────────────────────────
+          if ! echo "$REPO_URL" | grep -qE '^https://github\.com/[^/]+/[^/?#]+(\.git)?/?$'; then
+            echo "inject_status=skipped" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️ JekyllNet Pages Pipeline"
+              echo ""
+              echo "> Pages pipeline injection only supports \`github.com\` repositories."
+            } > /tmp/pages-inject-report.md
+            exit 0
+          fi
+
+          # ── Extract owner / repo ────────────────────────────────────────────
+          REPO_PATH=$(echo "$REPO_URL" \
+            | sed 's|https://github\.com/||' \
+            | sed 's|\.git$||' \
+            | sed 's|/$||')
+          UPSTREAM_OWNER=$(echo "$REPO_PATH" | cut -d'/' -f1)
+          UPSTREAM_REPO=$(echo "$REPO_PATH"  | cut -d'/' -f2)
+
+          # ── Get default branch ──────────────────────────────────────────────
+          DEFAULT_BRANCH=$(gh api "repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+            --jq '.default_branch' 2>/dev/null || echo "main")
+
+          # ── Fork (idempotent — gh reuses an existing fork) ──────────────────
+          echo "Forking ${UPSTREAM_OWNER}/${UPSTREAM_REPO} ..."
+          gh repo fork "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" --clone=false
+
+          FORK_OWNER=$(gh api user --jq '.login')
+          BRANCH="jekyllnet/add-pages-pipeline"
+
+          # ── Clone fork ──────────────────────────────────────────────────────
+          git clone \
+            "https://x-access-token:${GH_TOKEN}@github.com/${FORK_OWNER}/${UPSTREAM_REPO}.git" \
+            /tmp/fork-repo
+          cd /tmp/fork-repo
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+
+          # Sync fork default branch with upstream before branching
+          git fetch origin
+          git checkout "${DEFAULT_BRANCH}"
+          git pull origin "${DEFAULT_BRANCH}" --ff-only || true
+
+          # ── Create / reset feature branch ───────────────────────────────────
+          git checkout -B "$BRANCH"
+
+          # ── Add pages workflow ───────────────────────────────────────────────
+          mkdir -p .github/workflows
+          cp "${GITHUB_WORKSPACE}/tools/jekyllnet-pages-template.yml" \
+             ".github/workflows/jekyllnet-pages.yml"
+
+          git add .github/workflows/jekyllnet-pages.yml
+          git commit \
+            -m "ci: add JekyllNet GitHub Pages deployment pipeline" \
+            -m "Added automatically by JekyllNet Theme Store." \
+            -m "See: https://github.com/JekyllNet/Themes"
+
+          git push origin "$BRANCH" --force
+
+          # ── Open PR (skip if one already exists) ────────────────────────────
+          EXISTING_PR=$(gh pr list \
+            --repo "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+            --head "${FORK_OWNER}:${BRANCH}" \
+            --json url --jq '.[0].url' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            PR_URL="$EXISTING_PR"
+            PR_NOTE="(existing PR updated)"
+          else
+            PR_URL=$(gh pr create \
+              --repo "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+              --head "${FORK_OWNER}:${BRANCH}" \
+              --base "${DEFAULT_BRANCH}" \
+              --title "ci: add JekyllNet GitHub Pages deployment pipeline" \
+              --body-file "${GITHUB_WORKSPACE}/tools/pages-pr-body.md" 2>&1) || true
+            PR_NOTE=""
+          fi
+
+          if echo "$PR_URL" | grep -qE '^https://github\.com/'; then
+            echo "inject_status=success" >> "$GITHUB_OUTPUT"
+            echo "pr_url=$PR_URL"        >> "$GITHUB_OUTPUT"
+            {
+              echo "### 🚀 JekyllNet Pages Pipeline"
+              echo ""
+              echo "- ✅ PR opened to add GitHub Pages deployment pipeline ${PR_NOTE}"
+              echo "  > ${PR_URL}"
+              echo ""
+              echo "> **1 passed** | **0 failed** | **0 warnings**"
+              echo ""
+            } > /tmp/pages-inject-report.md
+          else
+            echo "inject_status=failed" >> "$GITHUB_OUTPUT"
+            {
+              echo "### 🚀 JekyllNet Pages Pipeline"
+              echo ""
+              echo "- ❌ Failed to open PR for GitHub Pages pipeline"
+              echo ""
+              echo '```'
+              echo "$PR_URL"
+              echo '```'
+              echo ""
+              echo "> **0 passed** | **1 failed** | **0 warnings**"
+              echo ""
+            } > /tmp/pages-inject-report.md
+            exit 1
+          fi
+
+      # ── 13. Post combined results as PR comment ────────────────────────────
+      - name: Post check results as PR comment
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+
+            function read(p) {
+              try { return fs.readFileSync(p, 'utf8').trimEnd(); } catch { return ''; }
+            }
+
+            const specReport        = read('/tmp/spec-report.md');
+            const structureReport   = read('/tmp/structure-report.md');
+            const buildReport       = read('/tmp/build-report.md');
+            const cloneReport       = read('/tmp/clone-report.md');
+            const pagesInjectReport = read('/tmp/pages-inject-report.md');
+
+            const specOk         = '${{ steps.spec-check.outcome }}'      === 'success';
+            const cloneStatus    = '${{ steps.clone-theme.outputs.clone_status }}';
+            const cloneOk        = cloneStatus === 'success';
+            const structOk       = '${{ steps.structure-check.outcome }}' === 'success';
+            const buildOk        = '${{ steps.build-check.outcome }}'     === 'success';
+            const pagesInjectOk  = '${{ steps.pages-inject.outcome }}'    === 'success';
+            const pagesExists    = '${{ steps.pages-exists.outputs.exists }}' === 'true';
+            const injectStatus   = '${{ steps.pages-inject.outputs.inject_status }}';
+            const pagesSkipped   = injectStatus === 'skipped' || injectStatus === '';
+
+            const repoUrl = '${{ steps.theme-info.outputs.repo_url }}';
+            const gitSha  = '${{ steps.theme-info.outputs.git_sha }}';
+
+            const allOk = specOk && (!repoUrl || (cloneOk && structOk && buildOk));
+
+            const overallIcon = allOk ? '✅' : '❌';
+            const overallText = allOk
+              ? '🎉 **All checks passed!** A maintainer will review your submission shortly.'
+              : '⚠️ **Some checks failed.** Please review the issues above and update your PR.';
+
+            let body = `## ${overallIcon} JekyllNet Theme Submission Check\n\n`;
+            body += `> _Automated checks powered by [ThemeChecker](../blob/HEAD/tools/ThemeChecker/Program.cs) — C# .NET 10_\n\n`;
+            body += `---\n\n`;
+
+            // Spec report
+            if (specReport) {
+              body += specReport + '\n\n---\n\n';
+            }
+
+            // Clone status (only shown if the URL was present but clone failed/skipped)
+            if (repoUrl && !cloneOk) {
+              body += `### ❌ Theme Repository Clone\n\n`;
+              body += cloneReport
+                ? cloneReport + '\n\n'
+                : '> Failed to clone the theme repository.\n\n';
+              body += '---\n\n';
+            }
+
+            // Structure report
+            if (cloneOk && structureReport) {
+              body += structureReport + '\n\n---\n\n';
+            } else if (repoUrl && cloneOk && !structureReport) {
+              body += '### ⏭️ Jekyll Theme Structure Check\n\n> No output.\n\n---\n\n';
+            } else if (!repoUrl) {
+              body += '### ⏭️ Jekyll Theme Structure Check\n\n';
+              body += '> Skipped — valid **Theme Repository URL** and **Git SHA** are required.\n\n---\n\n';
+            }
+
+            // Build report
+            if (cloneOk && buildReport) {
+              body += buildReport + '\n\n---\n\n';
+            } else if (!repoUrl) {
+              body += '### ⏭️ Jekyll Build Check\n\n';
+              body += '> Skipped — theme repository could not be cloned.\n\n---\n\n';
+            }
+
+            // Pages pipeline injection report
+            if (pagesExists) {
+              body += '### ✅ JekyllNet Pages Pipeline\n\n';
+              body += '> JekyllNet GitHub Pages pipeline already exists in this repository.\n\n---\n\n';
+            } else if (!cloneOk || !buildOk) {
+              body += '### ⏭️ JekyllNet Pages Pipeline\n\n';
+              body += '> Skipped — pages pipeline injection requires a successful build.\n\n---\n\n';
+            } else if (pagesInjectReport) {
+              body += pagesInjectReport + '\n\n---\n\n';
+            }
+
+            body += overallText;
+
+            // Upsert bot comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = 'JekyllNet Theme Submission Check';
+            const existing = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

@@ -1,0 +1,55 @@
+# This workflow is maintained by JekyllNet Theme Store.
+# It builds and deploys this Jekyll theme to GitHub Pages using JekyllNet.
+#
+# Prerequisites:
+#   Settings → Pages → Source → GitHub Actions
+#
+# See: https://github.com/JekyllNet/Themes
+
+name: JekyllNet GitHub Pages
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build with JekyllNet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build with JekyllNet
+        uses: JekyllNet/action@v2
+        with:
+          source: .
+          destination: _site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
