@@ -18,15 +18,15 @@ in the JekyllNet Theme Store.
 ### What this pipeline does
 
 - Triggers on every push to `main` / `master` and on manual dispatch
-- Builds your site with Jekyll in production mode
+- Builds your site using **[JekyllNet](https://github.com/JekyllNet/JekyllNet)** (a C# Jekyll-style static site generator)
 - Deploys the built site to **GitHub Pages** automatically
 
 ### Before you merge
 
 1. Make sure **GitHub Pages** is enabled in your repository settings:
    `Settings → Pages → Source → GitHub Actions`
-2. If your site needs specific Jekyll plugins, verify they are listed in your `Gemfile`.
-3. You can customise the `ruby-version` in the workflow if needed.
+2. The pipeline uses `JekyllNet/action@v2` which installs the JekyllNet .NET tool automatically — no extra setup required.
+3. Your site source is assumed to be at the repository root (`.`). If it lives elsewhere, update `source:` in the workflow.
 
 If you have any questions, please open an issue at [JekyllNet/Themes](https://github.com/JekyllNet/Themes/issues).
 
@@ -44,14 +44,14 @@ If you have any questions, please open an issue at [JekyllNet/Themes](https://gi
 ### 流水线功能
 
 - 在每次推送到 `main` / `master` 分支或手动触发时运行
-- 以生产模式使用 Jekyll 构建站点
+- 使用 **[JekyllNet](https://github.com/JekyllNet/JekyllNet)**（C# 编写的 Jekyll 风格静态站点生成器）构建站点
 - 自动将构建产物部署到 **GitHub Pages**
 
 ### 合并前请确认
 
 1. 确保在仓库设置中启用 **GitHub Pages**：
    `Settings → Pages → Source → GitHub Actions`
-2. 如果您的站点需要特定 Jekyll 插件，请确认它们已列在 `Gemfile` 中。
-3. 如有需要，可以在工作流文件中自定义 `ruby-version`。
+2. 流水线使用 `JekyllNet/action@v2`，会自动安装 JekyllNet .NET 工具，无需额外配置。
+3. 站点源目录默认为仓库根目录（`.`）。如果您的站点位于其他目录，请修改工作流中的 `source:` 参数。
 
 如有任何问题，欢迎在 [JekyllNet/Themes](https://github.com/JekyllNet/Themes/issues) 提交 Issue。
