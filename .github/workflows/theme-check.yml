@@ -194,7 +194,151 @@ jobs:
           } | tee /tmp/build-report.md
           exit "${PIPESTATUS[0]}"
 
-      # ── 11. Post combined results as PR comment ────────────────────────────
+      # ── 11. Check whether pages pipeline already exists in cloned repo ──────
+      - name: Check for existing pages pipeline
+        id: pages-exists
+        if: steps.clone-theme.outputs.clone_status == 'success'
+        run: |
+          if [ -f "/tmp/theme-repo/.github/workflows/jekyllnet-pages.yml" ]; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 12. Fork theme repo and inject JekyllNet pages pipeline via PR ─────
+      #        Requires secret: JEKYLLNET_BOT_TOKEN (PAT with repo scope)
+      - name: Inject JekyllNet pages pipeline
+        id: pages-inject
+        continue-on-error: true
+        if: |
+          steps.clone-theme.outputs.clone_status == 'success' &&
+          steps.pages-exists.outputs.exists == 'false' &&
+          steps.build-check.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.JEKYLLNET_BOT_TOKEN }}
+        run: |
+          REPO_URL="${{ steps.theme-info.outputs.repo_url }}"
+
+          # ── Guard: token must be set ────────────────────────────────────────
+          if [ -z "$GH_TOKEN" ]; then
+            echo "inject_status=skipped" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️ JekyllNet Pages Pipeline"
+              echo ""
+              echo "> Secret \`JEKYLLNET_BOT_TOKEN\` is not configured — injection skipped."
+            } > /tmp/pages-inject-report.md
+            exit 0
+          fi
+
+          # ── Guard: only github.com repos supported ──────────────────────────
+          if ! echo "$REPO_URL" | grep -qE '^https://github\.com/[^/]+/[^/?#]+(\.git)?/?$'; then
+            echo "inject_status=skipped" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️ JekyllNet Pages Pipeline"
+              echo ""
+              echo "> Pages pipeline injection only supports \`github.com\` repositories."
+            } > /tmp/pages-inject-report.md
+            exit 0
+          fi
+
+          # ── Extract owner / repo ────────────────────────────────────────────
+          REPO_PATH=$(echo "$REPO_URL" \
+            | sed 's|https://github\.com/||' \
+            | sed 's|\.git$||' \
+            | sed 's|/$||')
+          UPSTREAM_OWNER=$(echo "$REPO_PATH" | cut -d'/' -f1)
+          UPSTREAM_REPO=$(echo "$REPO_PATH"  | cut -d'/' -f2)
+
+          # ── Get default branch ──────────────────────────────────────────────
+          DEFAULT_BRANCH=$(gh api "repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+            --jq '.default_branch' 2>/dev/null || echo "main")
+
+          # ── Fork (idempotent — gh reuses an existing fork) ──────────────────
+          echo "Forking ${UPSTREAM_OWNER}/${UPSTREAM_REPO} ..."
+          gh repo fork "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" --clone=false
+
+          FORK_OWNER=$(gh api user --jq '.login')
+          BRANCH="jekyllnet/add-pages-pipeline"
+
+          # ── Clone fork ──────────────────────────────────────────────────────
+          git clone \
+            "https://x-access-token:${GH_TOKEN}@github.com/${FORK_OWNER}/${UPSTREAM_REPO}.git" \
+            /tmp/fork-repo
+          cd /tmp/fork-repo
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+
+          # Sync fork default branch with upstream before branching
+          git fetch origin
+          git checkout "${DEFAULT_BRANCH}"
+          git pull origin "${DEFAULT_BRANCH}" --ff-only || true
+
+          # ── Create / reset feature branch ───────────────────────────────────
+          git checkout -B "$BRANCH"
+
+          # ── Add pages workflow ───────────────────────────────────────────────
+          mkdir -p .github/workflows
+          cp "${GITHUB_WORKSPACE}/tools/jekyllnet-pages-template.yml" \
+             ".github/workflows/jekyllnet-pages.yml"
+
+          git add .github/workflows/jekyllnet-pages.yml
+          git commit \
+            -m "ci: add JekyllNet GitHub Pages deployment pipeline" \
+            -m "Added automatically by JekyllNet Theme Store." \
+            -m "See: https://github.com/JekyllNet/Themes"
+
+          git push origin "$BRANCH" --force
+
+          # ── Open PR (skip if one already exists) ────────────────────────────
+          EXISTING_PR=$(gh pr list \
+            --repo "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+            --head "${FORK_OWNER}:${BRANCH}" \
+            --json url --jq '.[0].url' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            PR_URL="$EXISTING_PR"
+            PR_NOTE="(existing PR updated)"
+          else
+            PR_URL=$(gh pr create \
+              --repo "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+              --head "${FORK_OWNER}:${BRANCH}" \
+              --base "${DEFAULT_BRANCH}" \
+              --title "ci: add JekyllNet GitHub Pages deployment pipeline" \
+              --body-file "${GITHUB_WORKSPACE}/tools/pages-pr-body.md" 2>&1) || true
+            PR_NOTE=""
+          fi
+
+          if echo "$PR_URL" | grep -qE '^https://github\.com/'; then
+            echo "inject_status=success" >> "$GITHUB_OUTPUT"
+            echo "pr_url=$PR_URL"        >> "$GITHUB_OUTPUT"
+            {
+              echo "### 🚀 JekyllNet Pages Pipeline"
+              echo ""
+              echo "- ✅ PR opened to add GitHub Pages deployment pipeline ${PR_NOTE}"
+              echo "  > ${PR_URL}"
+              echo ""
+              echo "> **1 passed** | **0 failed** | **0 warnings**"
+              echo ""
+            } > /tmp/pages-inject-report.md
+          else
+            echo "inject_status=failed" >> "$GITHUB_OUTPUT"
+            {
+              echo "### 🚀 JekyllNet Pages Pipeline"
+              echo ""
+              echo "- ❌ Failed to open PR for GitHub Pages pipeline"
+              echo ""
+              echo '```'
+              echo "$PR_URL"
+              echo '```'
+              echo ""
+              echo "> **0 passed** | **1 failed** | **0 warnings**"
+              echo ""
+            } > /tmp/pages-inject-report.md
+            exit 1
+          fi
+
+      # ── 13. Post combined results as PR comment ────────────────────────────
       - name: Post check results as PR comment
         uses: actions/github-script@v7
         if: always()
@@ -206,16 +350,21 @@ jobs:
               try { return fs.readFileSync(p, 'utf8').trimEnd(); } catch { return ''; }
             }
 
-            const specReport      = read('/tmp/spec-report.md');
-            const structureReport = read('/tmp/structure-report.md');
-            const buildReport     = read('/tmp/build-report.md');
-            const cloneReport     = read('/tmp/clone-report.md');
+            const specReport        = read('/tmp/spec-report.md');
+            const structureReport   = read('/tmp/structure-report.md');
+            const buildReport       = read('/tmp/build-report.md');
+            const cloneReport       = read('/tmp/clone-report.md');
+            const pagesInjectReport = read('/tmp/pages-inject-report.md');
 
-            const specOk      = '${{ steps.spec-check.outcome }}'      === 'success';
-            const cloneStatus = '${{ steps.clone-theme.outputs.clone_status }}';
-            const cloneOk     = cloneStatus === 'success';
-            const structOk    = '${{ steps.structure-check.outcome }}' === 'success';
-            const buildOk     = '${{ steps.build-check.outcome }}'     === 'success';
+            const specOk         = '${{ steps.spec-check.outcome }}'      === 'success';
+            const cloneStatus    = '${{ steps.clone-theme.outputs.clone_status }}';
+            const cloneOk        = cloneStatus === 'success';
+            const structOk       = '${{ steps.structure-check.outcome }}' === 'success';
+            const buildOk        = '${{ steps.build-check.outcome }}'     === 'success';
+            const pagesInjectOk  = '${{ steps.pages-inject.outcome }}'    === 'success';
+            const pagesExists    = '${{ steps.pages-exists.outputs.exists }}' === 'true';
+            const injectStatus   = '${{ steps.pages-inject.outputs.inject_status }}';
+            const pagesSkipped   = injectStatus === 'skipped' || injectStatus === '';
 
             const repoUrl = '${{ steps.theme-info.outputs.repo_url }}';
             const gitSha  = '${{ steps.theme-info.outputs.git_sha }}';
@@ -261,6 +410,17 @@ jobs:
             } else if (!repoUrl) {
               body += '### ⏭️ Jekyll Build Check\n\n';
               body += '> Skipped — theme repository could not be cloned.\n\n---\n\n';
+            }
+
+            // Pages pipeline injection report
+            if (pagesExists) {
+              body += '### ✅ JekyllNet Pages Pipeline\n\n';
+              body += '> JekyllNet GitHub Pages pipeline already exists in this repository.\n\n---\n\n';
+            } else if (!cloneOk || !buildOk) {
+              body += '### ⏭️ JekyllNet Pages Pipeline\n\n';
+              body += '> Skipped — pages pipeline injection requires a successful build.\n\n---\n\n';
+            } else if (pagesInjectReport) {
+              body += pagesInjectReport + '\n\n---\n\n';
             }
 
             body += overallText;
